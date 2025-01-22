@@ -1,0 +1,236 @@
+diff --git a/include/linux/pagemap.h b/include/linux/pagemap.h
+index 62db6b017..9255460cd 100644
+--- a/include/linux/pagemap.h
++++ b/include/linux/pagemap.h
+@@ -861,6 +861,9 @@ void page_cache_async_ra(struct readahead_control *, struct page *,
+ void readahead_expand(struct readahead_control *ractl,
+ 		      loff_t new_start, size_t new_len);
+ 
++void offload_pages2cache(struct readahead_control *ractl,
++                         unsigned long nr_to_read, unsigned long indexes[]);
++
+ /**
+  * page_cache_sync_readahead - generic file readahead
+  * @mapping: address_space which holds the pagecache and I/O vectors
+diff --git a/include/uapi/linux/bpf.h b/include/uapi/linux/bpf.h
+index 791f31dd0..f846cedf1 100644
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -5055,6 +5055,7 @@ union bpf_attr {
+ 	FN(get_func_ip),		\
+ 	FN(get_attach_cookie),		\
+ 	FN(task_pt_regs),		\
++	FN(force_page2cache),	\
+ 	/* */
+ 
+ /* integer value in 'imm' field of BPF_CALL instruction selects which helper
+diff --git a/kernel/bpf/core.c b/kernel/bpf/core.c
+index 6e3ae90ad..d6ba50c7a 100644
+--- a/kernel/bpf/core.c
++++ b/kernel/bpf/core.c
+@@ -2360,6 +2360,8 @@ const struct bpf_func_proto bpf_get_ns_current_pid_tgid_proto __weak;
+ const struct bpf_func_proto bpf_snprintf_btf_proto __weak;
+ const struct bpf_func_proto bpf_seq_printf_btf_proto __weak;
+ 
++const struct bpf_func_proto bpf_force_page2cache_proto __weak;
++
+ const struct bpf_func_proto * __weak bpf_get_trace_printk_proto(void)
+ {
+ 	return NULL;
+diff --git a/kernel/bpf/helpers.c b/kernel/bpf/helpers.c
+index 6f600cc95..07cbcb283 100644
+--- a/kernel/bpf/helpers.c
++++ b/kernel/bpf/helpers.c
+@@ -15,6 +15,7 @@
+ #include <linux/pid_namespace.h>
+ #include <linux/proc_ns.h>
+ #include <linux/security.h>
++#include <linux/pagemap.h>
+ 
+ #include "../../lib/kstrtox.h"
+ 
+@@ -243,6 +244,71 @@ const struct bpf_func_proto bpf_get_current_comm_proto = {
+ 	.arg2_type	= ARG_CONST_SIZE,
+ };
+ 
++BPF_CALL_2(bpf_force_page2cache, struct file **, f, struct bpf_map *, map)
++{
++	unsigned long i=0, *nr_pages, *index, *indexes;
++	struct file *filp;
++	struct address_space *mapping;
++	struct file_ra_state *ra;
++
++//	printk(KERN_WARNING "[jimsiak] %s-%d : bpf_force_page2cache started\n", current->comm, current->pid);
++
++	WARN_ON_ONCE(!rcu_read_lock_held() && !rcu_read_lock_bh_held());
++	nr_pages = (unsigned long *) map->ops->map_lookup_elem(map, &i);
++	indexes = kzalloc(*nr_pages*sizeof(unsigned long), GFP_ATOMIC);
++
++	printk(KERN_WARNING "[jimsiak] %s-%d: bpf_force_page2cache nr_pages = %lu\n", current->comm, current->pid, *nr_pages);
++	if (nr_pages != NULL) {
++		for(i=1; i <= *nr_pages; i++)
++		{
++			WARN_ON_ONCE(!rcu_read_lock_held() && !rcu_read_lock_bh_held());
++			index = (unsigned long *) map->ops->map_lookup_elem(map, &i);
++			indexes[i-1] = *index;
++			//printk(KERN_WARNING "[jimsiak] %s-%d : bpf_force_page2cache indexes[%lu] = 0x%lx\n", current->comm, current->pid, i-1, indexes[i-1]);
++		}
++	}
++
++	filp = *f;
++	mapping = filp->f_mapping;
++	ra = &filp->f_ra;
++
++	DEFINE_READAHEAD(ractl, filp, ra, mapping, 0);
++
++	u64 start = ktime_get_ns();
++	offload_pages2cache(&ractl, *nr_pages, indexes);
++	u64 end = ktime_get_ns();
++	printk(KERN_WARNING "[jimsiak] <test> offload_pages2cache took %llu ms\n",
++	                    (end-start) / 1000000);
++
++	printk(KERN_WARNING "[jimsiak] going to wait for the pages to be served\n");
++	start = ktime_get_ns();
++	if (nr_pages != NULL) {
++		for(i=0; i < *nr_pages; i++)
++		{
++			struct page *page = find_get_page(mapping, index[i]);
++			if (!page) continue;
++			wait_on_page_locked(page);
++			put_page(page);
++		}
++	}
++	end = ktime_get_ns();
++	printk(KERN_WARNING "[jimsiak] waiting on pages took %llu ms\n",
++	                    (end-start) / 1000000);
++
++	kfree(indexes);
++//	printk(KERN_WARNING "[jimsiak] %s-%d : bpf_force_page2cache exits...\n", current->comm, current->pid);
++
++	return 0;
++}
++
++const struct bpf_func_proto bpf_force_page2cache_proto = {
++	.func		= bpf_force_page2cache,
++	.gpl_only	= false,
++	.ret_type	= RET_INTEGER,
++	.arg1_type	= ARG_ANYTHING,
++	.arg2_type	= ARG_ANYTHING,
++};
++
+ #if defined(CONFIG_QUEUED_SPINLOCKS) || defined(CONFIG_BPF_ARCH_SPINLOCK)
+ 
+ static inline void __bpf_spin_lock(struct bpf_spin_lock *lock)
+@@ -1379,6 +1445,9 @@ bpf_base_func_proto(enum bpf_func_id func_id)
+ 		return &bpf_ringbuf_query_proto;
+ 	case BPF_FUNC_for_each_map_elem:
+ 		return &bpf_for_each_map_elem_proto;
++	case BPF_FUNC_force_page2cache:
++		printk(KERN_WARNING "[jimsiak] bpf_base_func_proto case in force_page2cache\n");
++		return &bpf_force_page2cache_proto;
+ 	default:
+ 		break;
+ 	}
+diff --git a/mm/readahead.c b/mm/readahead.c
+index 41b75d76d..ec7809076 100644
+--- a/mm/readahead.c
++++ b/mm/readahead.c
+@@ -179,6 +179,13 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
+ 	LIST_HEAD(page_pool);
+ 	gfp_t gfp_mask = readahead_gfp_mask(mapping);
+ 	unsigned long i;
++	u64 start, end;
++
++	if (nr_to_read > 110000)
++		printk(KERN_WARNING "[jimsiak] inside %s nr_to_read: %lu lookahead_size: %lu\n",
++		                    __func__, nr_to_read, lookahead_size);
++
++	start = ktime_get_ns();
+ 
+ 	/*
+ 	 * Partway through the readahead operation, we will have added
+@@ -239,6 +246,12 @@ void page_cache_ra_unbounded(struct readahead_control *ractl,
+ 	read_pages(ractl, &page_pool, false);
+ 	filemap_invalidate_unlock_shared(mapping);
+ 	memalloc_nofs_restore(nofs);
++
++	end = ktime_get_ns();
++
++	if (nr_to_read > 110000)
++		printk(KERN_WARNING "[jimsiak] exiting %s nr_to_read: %lu lookahead_size: %lu after %llu ms\n",
++		                    __func__, nr_to_read, lookahead_size, (end-start) / 1000000);
+ }
+ EXPORT_SYMBOL_GPL(page_cache_ra_unbounded);
+ 
+@@ -432,6 +445,71 @@ static int try_context_readahead(struct address_space *mapping,
+ 	return 1;
+ }
+ 
++void offload_pages2cache(struct readahead_control *ractl,
++                         unsigned long nr_to_read, unsigned long *indexes)
++{
++	struct inode *inode = ractl->mapping->host;
++	unsigned long index, prev_index, i, j, seq_pages_to_read;
++	loff_t isize;
++	pgoff_t end_index;
++
++	printk(KERN_WARNING "[jimsiak] %s-%d: offload_pages2cache started", current->comm, current->pid);
++	if(indexes == NULL) {
++		printk(KERN_WARNING "[jimsiak] offload_pages2cache indexes == NULL return...");
++		return;
++	}
++	if(ractl == NULL) {
++		printk(KERN_WARNING "[jimsiak] offload_pages2cache ractl == NULL return...");
++		return;
++	}
++
++	isize = i_size_read(inode);
++	if (isize == 0)
++		return;
++
++	end_index = (isize - 1) >> PAGE_SHIFT;
++
++	for(i = 0; i < nr_to_read; i++) {
++		index = indexes[i];
++		ractl->_index = index;
++		if (index > end_index)
++			return;
++
++		seq_pages_to_read = 1;
++		for(j = i + 1; j < nr_to_read; j++)
++		{
++			prev_index = index;
++			index = indexes[j];
++			if (index > end_index) {
++				page_cache_ra_unbounded(ractl, seq_pages_to_read, 0);
++				return;
++			}
++//			if (index != prev_index + 1)
++//				break;
++//			seq_pages_to_read += 1;
++			if (index - prev_index > 8)
++				break;
++			seq_pages_to_read += (index-prev_index);
++
++			// Don't read past the page containing the last byte of the file
++			if (seq_pages_to_read > end_index - ractl->_index) {
++				seq_pages_to_read = end_index - ractl->_index + 1;
++				printk(KERN_WARNING "[jimsiak] 1. Calling page_cache_ra_unbounded with seq_pages_to_read = %lu (%lu - %lu)", seq_pages_to_read, index, end_index);
++				page_cache_ra_unbounded(ractl, seq_pages_to_read, 0);
++				return;
++			}
++		}
++
++		printk(KERN_WARNING "[jimsiak] 2. Calling page_cache_ra_unbounded with seq_pages_to_read = %lu (%lu - %lu)", seq_pages_to_read, indexes[i], indexes[j]);
++		page_cache_ra_unbounded(ractl, seq_pages_to_read, 0);
++
++//		i = i + seq_pages_to_read - 1;
++		i = j;
++	}
++
++	printk(KERN_WARNING "[jimsiak] %s-%d: <> offload_pages2cache exits...", current->comm, current->pid);
++}
++
+ /*
+  * A minimal readahead algorithm for trivial sequential/random reads.
+  */
