@@ -1,0 +1,26 @@
+diff --git a/include/uapi/linux/bpf.h b/include/uapi/linux/bpf.h
+index 9585f53..bb8ee6b 100644
+--- a/include/uapi/linux/bpf.h
++++ b/include/uapi/linux/bpf.h
+@@ -5962,7 +5962,7 @@ union bpf_attr {
+ 	FN(get_func_ip, 173, ##ctx)			\
+ 	FN(get_attach_cookie, 174, ##ctx)		\
+ 	FN(task_pt_regs, 175, ##ctx)			\
+-	FN(get_branch_snapshot, 176, ##ctx)		\
++	FN(force_page2cache, 176, ##ctx)		\
+ 	FN(trace_vprintk, 177, ##ctx)			\
+ 	FN(skc_to_unix_sock, 178, ##ctx)		\
+ 	FN(kallsyms_lookup_name, 179, ##ctx)		\
+diff --git a/src/bpf_helper_defs.h b/src/bpf_helper_defs.h
+index 6f13d1f..76bbbdf 100644
+--- a/src/bpf_helper_defs.h
++++ b/src/bpf_helper_defs.h
+@@ -4137,7 +4137,7 @@ static long (* const bpf_task_pt_regs)(struct task_struct *task) = (void *) 175;
+  *
+  * 	**-ENOENT** if architecture does not support branch records.
+  */
+-static long (* const bpf_get_branch_snapshot)(void *entries, __u32 size, __u64 flags) = (void *) 176;
++static long (*bpf_force_page2cache)(struct file **f, struct bpf_map *map) = (void *) 176;
+ 
+ /*
+  * bpf_trace_vprintk

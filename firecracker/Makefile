@@ -2,8 +2,8 @@ CLANG = clang
 CFLAGS = -g -O2 -Wall
 BPFTARGETFLAG = -target bpf
 
-LIBBPF_BUILD = /home/users/jimsiak/ebpf/other-examples/libbpf/build
-INCFLAGS = -I . -I$(LIBBPF_BUILD)
+LIBBPF_BUILD = /home/users/jimsiak/ebpf/libbpf/build
+INCFLAGS = -I . -I$(LIBBPF_BUILD)/usr/include
 LFLAGS = -lelf -lz
 
 BPFTOOL = /usr/sbin/bpftool
